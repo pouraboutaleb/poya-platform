@@ -9,6 +9,7 @@ import materialDeliveryReducer from './materialDeliverySlice';
 import productionFollowUpReducer from './productionFollowUpSlice';
 import partPickupReducer from './partPickupSlice';
 import qcInspectionReducer from './qcInspectionSlice';
+import notificationReducer from './slices/notificationSlice';
 
 export const store = configureStore({
   reducer: {
@@ -18,6 +19,11 @@ export const store = configureStore({
     productionReports: productionReportReducer,
     warehouseRequests: warehouseRequestReducer,
     orders: orderReducer,
+    materialDelivery: materialDeliveryReducer,
+    productionFollowUp: productionFollowUpReducer,
+    partPickup: partPickupReducer,
+    qcInspection: qcInspectionReducer,
+    notifications: notificationReducer,
     materialDelivery: materialDeliveryReducer,
     productionFollowUp: productionFollowUpReducer,
     partPickup: partPickupReducer,

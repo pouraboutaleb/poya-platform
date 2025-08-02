@@ -1,15 +1,22 @@
 from datetime import datetime, timedelta
 from sqlalchemy.orm import Session
+from typing import List, Optional
 from ..models.order import Order, OrderType, OrderStatus
 from ..models.item import Item
 from ..models.warehouse_request import WarehouseRequestItem
 from ..models.task import Task, TaskType, TaskStatus
 from ..schemas.order import OrderCreate
+from ..services.notification_service import NotificationService
+from ..services.audit_service import AuditService
 
 class OrderService:
-    @staticmethod
+    def __init__(self, db: Session):
+        self.db = db
+        self.notification_service = NotificationService(db)
+        self.audit_service = AuditService(db)
+
     def create_shortage_order(
-        db: Session,
+        self,
         item_id: int,
         warehouse_request_item_id: int,
         created_by_id: int,
@@ -21,12 +28,12 @@ class OrderService:
         Automatically determines if it should be a procurement or production order.
         """
         # Get the item details to determine order type
-        item = db.query(Item).filter(Item.id == item_id).first()
+        item = self.db.query(Item).filter(Item.id == item_id).first()
         if not item:
             raise ValueError("Item not found")
 
         # Get the request item for context
-        request_item = db.query(WarehouseRequestItem).filter(
+        request_item = self.db.query(WarehouseRequestItem).filter(
             WarehouseRequestItem.id == warehouse_request_item_id
         ).first()
         if not request_item:
@@ -53,24 +60,56 @@ class OrderService:
             warehouse_request_item_id=warehouse_request_item_id
         )
 
-        db.add(order)
-        db.commit()
-        db.refresh(order)
+        self.db.add(order)
+        self.db.commit()
+        self.db.refresh(order)
+
+        # Log the creation
+        self.audit_service.create_log(
+            user_id=created_by_id,
+            action="CREATE",
+            target_entity="Order",
+            target_id=str(order.id),
+            details={
+                "type": order_type,
+                "item_id": item_id,
+                "quantity": quantity,
+                "warehouse_request_item_id": warehouse_request_item_id
+            }
+        )
+
+        # Notify based on order type
+        if order_type == OrderType.PROCUREMENT:
+            # Notify procurement team
+            self.notification_service.create_notification(
+                user_id=None,  # TODO: Get procurement team lead's ID
+                message=f"New procurement order #{order.id} created for {quantity} units of item #{item_id}",
+                type="ORDER",
+                link=f"/orders/{order.id}"
+            )
+        else:  # PRODUCTION
+            # Notify production planning
+            self.notification_service.create_notification(
+                user_id=None,  # TODO: Get production planner's ID
+                message=f"New production order #{order.id} created for {quantity} units of item #{item_id}",
+                type="ORDER",
+                link=f"/orders/{order.id}"
+            )
 
         return order
 
-    @staticmethod
     def update_order_status(
-        db: Session,
+        self,
         order_id: int,
         status: str,
+        user_id: int,
         remarks: str = None
     ) -> Order:
         """
         Update an order's status and optionally add remarks.
         Also updates the related warehouse request item if needed.
         """
-        order = db.query(Order).filter(Order.id == order_id).first()
+        order = self.db.query(Order).filter(Order.id == order_id).first()
         if not order:
             raise ValueError("Order not found")
 
@@ -81,7 +120,7 @@ class OrderService:
 
         # If order is completed, update the warehouse request item
         if status == OrderStatus.COMPLETED and order.warehouse_request_item_id:
-            request_item = db.query(WarehouseRequestItem).filter(
+            request_item = self.db.query(WarehouseRequestItem).filter(
                 WarehouseRequestItem.id == order.warehouse_request_item_id
             ).first()
             if request_item:
@@ -89,8 +128,57 @@ class OrderService:
                 request_item.quantity_fulfilled = order.quantity
                 request_item.remarks = f"Fulfilled via {order.order_type} order #{order.id}"
 
-        db.commit()
-        db.refresh(order)
+        self.db.commit()
+        self.db.refresh(order)
+
+        # Log the status change
+        self.audit_service.create_log(
+            user_id=user_id,
+            action="UPDATE",
+            target_entity="Order",
+            target_id=str(order_id),
+            details={
+                "status_change": {
+                    "from": old_status,
+                    "to": status
+                },
+                "remarks": remarks
+            }
+        )
+
+        # Send notifications based on the new status
+        if status == OrderStatus.COMPLETED:
+            # Notify the creator
+            self.notification_service.create_notification(
+                user_id=order.created_by_id,
+                message=f"Order #{order.id} has been completed",
+                type="ORDER",
+                link=f"/orders/{order.id}"
+            )
+
+            # If this was for a warehouse request, notify the requestor
+            if order.warehouse_request_item_id and request_item:
+                self.notification_service.create_notification(
+                    user_id=request_item.request.created_by_id,
+                    message=f"Your warehouse request #{request_item.request_id} has been fulfilled",
+                    type="WAREHOUSE_REQUEST",
+                    link=f"/warehouse-requests/{request_item.request_id}"
+                )
+
+        elif status == OrderStatus.CANCELLED:
+            # Notify relevant parties about cancellation
+            stakeholders = [order.created_by_id]
+            if order.assigned_to_id:
+                stakeholders.append(order.assigned_to_id)
+            
+            for user_id in stakeholders:
+                self.notification_service.create_notification(
+                    user_id=user_id,
+                    message=f"Order #{order.id} has been cancelled",
+                    type="ORDER",
+                    link=f"/orders/{order.id}"
+                )
+
         return order
 
     @staticmethod
@@ -111,9 +199,8 @@ class OrderService:
             Order.status.in_([OrderStatus.DRAFT, OrderStatus.SUBMITTED])
         ).all()
 
-    @staticmethod
     def mark_order_purchased(
-        db: Session,
+        self,
         order_id: int,
         vendor_name: str,
         price: float,
@@ -122,7 +209,7 @@ class OrderService:
         """
         Mark a procurement order as purchased and create a receiving task.
         """
-        order = db.query(Order).filter(Order.id == order_id).first()
+        order = self.db.query(Order).filter(Order.id == order_id).first()
         if not order:
             raise ValueError("Order not found")
         
@@ -145,8 +232,31 @@ class OrderService:
             order_id=order.id
         )
         
-        db.add(task)
-        db.commit()
-        db.refresh(order)
+        self.db.add(task)
+        
+        # Log the purchase
+        self.audit_service.create_log(
+            user_id=user_id,
+            action="PURCHASE",
+            target_entity="Order",
+            target_id=str(order_id),
+            details={
+                "vendor": vendor_name,
+                "price": price,
+                "quantity": order.quantity,
+                "item_id": order.item_id
+            }
+        )
+        
+        # Notify warehouse team about incoming delivery
+        self.notification_service.create_notification(
+            user_id=None,  # TODO: Get warehouse manager's ID
+            message=f"New delivery expected: Order #{order.id} from {vendor_name}",
+            type="RECEIVING",
+            link=f"/tasks/{task.id}"
+        )
+        
+        self.db.commit()
+        self.db.refresh(order)
         
         return order
