@@ -1,12 +1,21 @@
+"""Notification schema definitions"""
+from pydantic import BaseModel
 from datetime import datetime
 from typing import Optional
-from pydantic import BaseModel
+from enum import Enum
+
+
+class NotificationType(str, Enum):
+    INFO = "info"
+    WARNING = "warning"
+    ERROR = "error"
+    SUCCESS = "success"
 
 
 class NotificationBase(BaseModel):
+    title: str
     message: str
-    type: str
-    link: Optional[str] = None
+    type: NotificationType = NotificationType.INFO
 
 
 class NotificationCreate(NotificationBase):
@@ -16,9 +25,9 @@ class NotificationCreate(NotificationBase):
 class NotificationResponse(NotificationBase):
     id: int
     user_id: int
-    is_read: bool
+    is_read: bool = False
     created_at: datetime
-    read_at: Optional[datetime]
+    updated_at: Optional[datetime] = None
 
     class Config:
-        orm_mode = True
+        from_attributes = True

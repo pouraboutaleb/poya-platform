@@ -1,0 +1,164 @@
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  db:
+    image: postgres:13-alpine
+    container_name: mrdpol_db
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-mrdpol_core_db}
+      POSTGRES_USER: ${POSTGRES_USER:-mrdpol_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mrdpol_secure_password}
+      PGDATA: /var/lib/postgresql/data/pgdata
+    volumes:
+      - postgres_data:/var/lib/postgresql/data/pgdata
+      - ./backend/scripts/init_db.sql:/docker-entrypoint-initdb.d/init_db.sql:ro
+    ports:
+      - "5432:5432"
+    networks:
+      - mrdpol_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mrdpol_user} -d ${POSTGRES_DB:-mrdpol_core_db}"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 30s
+
+  # Redis Cache (optional, for session management and caching)
+  redis:
+    image: redis:7-alpine
+    container_name: mrdpol_redis
+    restart: unless-stopped
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    networks:
+      - mrdpol_network
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Backend API Service
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: mrdpol_backend
+    restart: unless-stopped
+    environment:
+      # Database Configuration
+      DATABASE_URL: postgresql://${POSTGRES_USER:-mrdpol_user}:${POSTGRES_PASSWORD:-mrdpol_secure_password}@db:5432/${POSTGRES_DB:-mrdpol_core_db}
+      
+      # Security Configuration
+      SECRET_KEY: ${SECRET_KEY:-your-super-secret-key-change-in-production}
+      ALGORITHM: ${ALGORITHM:-HS256}
+      ACCESS_TOKEN_EXPIRE_MINUTES: ${ACCESS_TOKEN_EXPIRE_MINUTES:-30}
+      REFRESH_TOKEN_EXPIRE_DAYS: ${REFRESH_TOKEN_EXPIRE_DAYS:-7}
+      
+      # Application Configuration
+      DEBUG: ${DEBUG:-false}
+      ENVIRONMENT: ${ENVIRONMENT:-production}
+      
+      # CORS Configuration
+      CORS_ORIGINS: ${CORS_ORIGINS:-http://localhost,https://localhost}
+      
+      # File Storage
+      STORAGE_PATH: ${STORAGE_PATH:-./storage}
+      MAX_FILE_SIZE: ${MAX_FILE_SIZE:-10485760}
+      
+      # Redis Configuration
+      REDIS_URL: redis://redis:6379/0
+      
+      # Email Configuration (if needed)
+      MAIL_SERVER: ${MAIL_SERVER:-}
+      MAIL_PORT: ${MAIL_PORT:-587}
+      MAIL_USERNAME: ${MAIL_USERNAME:-}
+      MAIL_PASSWORD: ${MAIL_PASSWORD:-}
+      MAIL_FROM: ${MAIL_FROM:-noreply@mrdpol.com}
+      
+    volumes:
+      - backend_storage:/app/storage
+      - backend_logs:/app/logs
+    ports:
+      - "8000:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - mrdpol_network
+    healthcheck:
+      test: ["CMD", "python", "-c", "import requests; requests.get('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Frontend & Reverse Proxy (Nginx)
+  nginx:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: mrdpol_frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    depends_on:
+      backend:
+        condition: service_healthy
+    networks:
+      - mrdpol_network
+    volumes:
+      - ./ssl:/etc/nginx/ssl:ro  # Mount SSL certificates if available
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:80/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  # Optional: Database Admin Interface
+  pgadmin:
+    image: dpage/pgadmin4:latest
+    container_name: mrdpol_pgadmin
+    restart: unless-stopped
+    environment:
+      PGADMIN_DEFAULT_EMAIL: ${PGADMIN_EMAIL:-admin@mrdpol.com}
+      PGADMIN_DEFAULT_PASSWORD: ${PGADMIN_PASSWORD:-admin_password}
+      PGADMIN_CONFIG_SERVER_MODE: 'False'
+    ports:
+      - "5050:80"
+    volumes:
+      - pgadmin_data:/var/lib/pgadmin
+    networks:
+      - mrdpol_network
+    depends_on:
+      - db
+    profiles:
+      - admin  # Use with: docker-compose --profile admin up
+
+# Named volumes for persistent data
+volumes:
+  postgres_data:
+    driver: local
+  redis_data:
+    driver: local
+  backend_storage:
+    driver: local
+  backend_logs:
+    driver: local
+  pgadmin_data:
+    driver: local
+
+# Custom network
+networks:
+  mrdpol_network:
+    driver: bridge
+    ipam:
+      config:
+        - subnet: 172.20.0.0/16
